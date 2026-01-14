@@ -195,7 +195,7 @@ export default function Dashboard() {
               {cat === "materia_prima" && <LucideWheat size={16} />}
               {cat === "produccion" && <LucideChefHat size={16} />}
               {cat === "pedido" && <ScrollText size={16} />}
-              <span className="capitalize">{cat.replace("_", " ")}s</span>
+              <span className="capitalize">{cat.replace("_", " ")}</span>
             </button>
           ))}
         </div>
