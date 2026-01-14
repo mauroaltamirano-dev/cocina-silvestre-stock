@@ -36,7 +36,7 @@ export default function App() {
         </Routes>
       </BrowserRouter>
 
-      <Toaster position="bottom-center" reverseOrder={false} />
+      <Toaster position="top-center" reverseOrder={false} />
     </AuthProvider>
   );
 }
