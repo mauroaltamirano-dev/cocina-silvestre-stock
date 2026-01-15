@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { supabase } from "../lib/supabase";
 import toast from "react-hot-toast";
 
-// Helper para fecha en Store
+// Helper Fecha
 const getFechaHoyISO = () => {
   const hoyStart = new Date();
   hoyStart.setHours(0, 0, 0, 0);
@@ -23,9 +23,13 @@ const formatearFecha = (fechaISO) => {
 export const useStockStore = create((set, get) => ({
   productos: [],
   historial: [],
+  pendientes: {},
   loading: true,
 
-  // --- PRODUCTOS ---
+  // Almacén de temporizadores para el debounce (evita lag en clicks rápidos)
+  writeTimeouts: {},
+
+  // --- CARGAR PRODUCTOS (Con Lógica Híbrida) ---
   cargarProductos: async () => {
     set({ loading: true });
     try {
@@ -34,26 +38,65 @@ export const useStockStore = create((set, get) => ({
         .select("*")
         .order("created_at", { ascending: true });
       if (error) throw error;
-      set({ productos: data });
+
+      // Mapa para acceso rápido
+      const productosMap = new Map(data.map((p) => [p.id, p]));
+
+      const productosProcesados = data.map((prod) => {
+        // Si tiene un padre configurado
+        if (prod.stock_padre_id && prod.factor_conversion) {
+          const padre = productosMap.get(prod.stock_padre_id);
+          if (padre) {
+            // --- LÓGICA HÍBRIDA DE LECTURA ---
+            const esContenido = padre.unidad === "unidad"; // Si el padre es Maple, Pack, Caja
+            let cantidadCalculada = 0;
+
+            if (esContenido) {
+              // Lógica Multiplicación (Ej: 2 Maples * 30 = 60 Huevos)
+              cantidadCalculada = padre.cantidad * prod.factor_conversion;
+            } else {
+              // Lógica División (Ej: 5 Kg Carne / 0.145 = 34.48 Medallones)
+              cantidadCalculada =
+                prod.factor_conversion > 0
+                  ? padre.cantidad / prod.factor_conversion
+                  : 0;
+            }
+
+            return {
+              ...prod,
+              cantidad: parseFloat(cantidadCalculada.toFixed(2)),
+            };
+          }
+        }
+        return prod;
+      });
+
+      set({ productos: productosProcesados });
+      get().calcularPendientes();
     } catch (error) {
+      console.error(error);
       toast.error("Error cargando productos");
     } finally {
       set({ loading: false });
     }
   },
 
+  // --- CRUD BÁSICO ---
   agregarProducto: async (nuevoProducto) => {
-    const { error } = await supabase.from("productos").insert([nuevoProducto]);
+    const { data, error } = await supabase
+      .from("productos")
+      .insert([nuevoProducto])
+      .select()
+      .single();
     if (error) {
       toast.error("Error al guardar");
-      return false;
+      return null;
     }
     toast.success("¡Producto creado!");
     get().cargarProductos();
-    return true;
+    return data;
   },
 
-  // [NUEVO] Editar Producto
   editarProducto: async (id, datosActualizados) => {
     const { error } = await supabase
       .from("productos")
@@ -64,12 +107,7 @@ export const useStockStore = create((set, get) => ({
       return false;
     }
     toast.success("Producto actualizado");
-    // Actualización optimista local
-    set((state) => ({
-      productos: state.productos.map((p) =>
-        p.id === id ? { ...p, ...datosActualizados } : p
-      ),
-    }));
+    get().cargarProductos();
     return true;
   },
 
@@ -83,24 +121,100 @@ export const useStockStore = create((set, get) => ({
     }
   },
 
-  actualizarStockCantidad: async (id, nuevaCantidad) => {
-    // Optimistic UI
-    set((state) => ({
-      productos: state.productos.map((p) =>
-        p.id === id ? { ...p, cantidad: nuevaCantidad } : p
-      ),
-    }));
-    const { error } = await supabase
-      .from("productos")
-      .update({ cantidad: nuevaCantidad })
-      .eq("id", id);
-    if (error) {
-      toast.error("Error de sincronización");
-      get().cargarProductos();
-    }
+  // --- LÓGICA DE STOCK EN TIEMPO REAL (DEBOUNCE) ---
+
+  // 1. Esta función se llama desde los botones (+ / -)
+  sumarStock: (id, cantidadASumar) => {
+    const productos = get().productos;
+    const prod = productos.find((p) => p.id === id);
+    if (!prod) return;
+
+    // Calculamos el nuevo total basado en la memoria real
+    const nuevoTotal = parseFloat((prod.cantidad + cantidadASumar).toFixed(3));
+
+    // Llamamos a la función principal
+    get().actualizarStockCantidad(id, nuevoTotal);
   },
 
-  // --- HISTORIAL & PEDIDOS ---
+  // 2. Esta función actualiza UI instantáneamente y espera para guardar en DB
+  actualizarStockCantidad: async (id, nuevaCantidad) => {
+    const productosActuales = get().productos;
+    const prod = productosActuales.find((p) => p.id === id);
+
+    // 🛑 CASO A: Es un HIJO (Ej: Modifico Huevos o Medallones manualmente)
+    if (prod && prod.stock_padre_id && prod.factor_conversion) {
+      // Necesitamos el padre para saber su unidad
+      const padre = productosActuales.find((p) => p.id === prod.stock_padre_id);
+
+      if (padre) {
+        const esContenido = padre.unidad === "unidad";
+        let nuevoStockPadre = 0;
+
+        if (esContenido) {
+          // Inversa de Multiplicación -> División (Huevos a Maples)
+          nuevoStockPadre = nuevaCantidad / prod.factor_conversion;
+        } else {
+          // Inversa de División -> Multiplicación (Medallones a Carne)
+          nuevoStockPadre = nuevaCantidad * prod.factor_conversion;
+        }
+
+        // Llamada recursiva al padre (Esto entrará en CASO B)
+        return get().actualizarStockCantidad(
+          prod.stock_padre_id,
+          parseFloat(nuevoStockPadre.toFixed(4))
+        );
+      }
+    }
+
+    // 🟢 CASO B: Es un PRODUCTO NORMAL o PADRE
+
+    // 1. Actualizamos la UI INMEDIATAMENTE (Optimistic Update)
+    const nuevosProductos = productosActuales.map((p) => {
+      // A) Si es el producto tocado
+      if (p.id === id) return { ...p, cantidad: nuevaCantidad };
+
+      // B) Si es un HIJO de este producto (Recalculamos visualmente)
+      if (p.stock_padre_id === id && p.factor_conversion) {
+        // 'prod' aquí es el padre que estamos editando
+        const padreUnidad = prod.unidad === "unidad";
+        let cantidadHijo = 0;
+
+        if (padreUnidad) {
+          cantidadHijo = nuevaCantidad * p.factor_conversion;
+        } else {
+          cantidadHijo =
+            p.factor_conversion > 0 ? nuevaCantidad / p.factor_conversion : 0;
+        }
+        return { ...p, cantidad: parseFloat(cantidadHijo.toFixed(2)) };
+      }
+      return p;
+    });
+
+    set({ productos: nuevosProductos });
+
+    // 2. DEBOUNCE (Frenado) DE LA BASE DE DATOS
+    const timeouts = get().writeTimeouts;
+    if (timeouts[id]) clearTimeout(timeouts[id]);
+
+    const nuevoTimeout = setTimeout(async () => {
+      const { error } = await supabase
+        .from("productos")
+        .update({ cantidad: nuevaCantidad })
+        .eq("id", id);
+      if (error) {
+        toast.error("Error guardando");
+        get().cargarProductos();
+      }
+      // Limpieza de timeout
+      const currentTs = get().writeTimeouts;
+      const { [id]: _, ...rest } = currentTs;
+      set({ writeTimeouts: rest });
+    }, 500); // 500ms de espera
+
+    set({ writeTimeouts: { ...timeouts, [id]: nuevoTimeout } });
+  },
+
+  // --- PEDIDOS E HISTORIAL (Sin cambios) ---
   cargarHistorial: async () => {
     const { data } = await supabase
       .from("pedidos")
@@ -110,50 +224,92 @@ export const useStockStore = create((set, get) => ({
   },
 
   borrarPedido: async (id) => {
-    if (!confirm("¿Eliminar este pedido del historial?")) return;
-    const { error } = await supabase.from("pedidos").delete().eq("id", id);
-    if (error) toast.error("Error al eliminar");
-    else {
-      toast.success("Pedido eliminado");
+    if (
+      !confirm(
+        "¿Eliminar este pedido del historial? \n⚠️ Si el pedido fue entregado, se descontará del stock."
+      )
+    )
+      return;
+    const toastId = toast.loading("Eliminando...");
+    try {
+      const { data: pedidoData } = await supabase
+        .from("pedidos")
+        .select(`*, detalle_pedidos (*)`)
+        .eq("id", id)
+        .single();
+      const actualizacionesDeStock = [];
+      for (const item of pedidoData.detalle_pedidos) {
+        if (item.estado === "entregado") {
+          const cantidadARestar = parseFloat(item.cantidad_solicitada);
+          const productoEnStock = get().productos.find(
+            (p) => p.nombre === item.producto_nombre
+          );
+          if (productoEnStock) {
+            const nuevoStock = parseFloat(
+              (productoEnStock.cantidad - cantidadARestar).toFixed(3)
+            );
+            // Usamos update directo para evitar el debounce en borrado masivo
+            actualizacionesDeStock.push(
+              supabase
+                .from("productos")
+                .update({ cantidad: nuevoStock })
+                .eq("id", productoEnStock.id)
+            );
+          }
+        }
+      }
+      if (actualizacionesDeStock.length > 0)
+        await Promise.all(actualizacionesDeStock);
+      await supabase.from("pedidos").delete().eq("id", id);
+      toast.success("Pedido eliminado", { id: toastId });
       get().cargarHistorial();
+      get().cargarProductos();
+      get().calcularPendientes();
+    } catch (e) {
+      toast.error("Error", { id: toastId });
     }
   },
 
-  // [LÓGICA DE FUSIÓN MOVIDA AL STORE]
+  calcularPendientes: async () => {
+    const { data } = await supabase
+      .from("detalle_pedidos")
+      .select("producto_nombre, cantidad_solicitada")
+      .eq("recibido", false);
+    const mapaPendientes = {};
+    if (data) {
+      data.forEach((item) => {
+        const cantidad = parseFloat(item.cantidad_solicitada) || 0;
+        mapaPendientes[item.producto_nombre] =
+          (mapaPendientes[item.producto_nombre] || 0) + cantidad;
+      });
+    }
+    set({ pendientes: mapaPendientes });
+  },
+
   procesarPedido: async (itemsAEnviar, cantidadesPedido) => {
-    const toastId = toast.loading("Procesando pedido...");
+    const toastId = toast.loading("Procesando...");
     try {
       const { start, end } = getFechaHoyISO();
-
-      // 1. Buscar si existe pedido hoy
       const { data: pedidosHoy } = await supabase
         .from("pedidos")
         .select("id, created_at, detalle_pedidos(*)")
         .gte("created_at", start)
         .lte("created_at", end);
-
       let pedidoId;
-      let esActualizacion = false;
       let pedidoExistente =
         pedidosHoy && pedidosHoy.length > 0 ? pedidosHoy[0] : null;
 
       if (pedidoExistente) {
-        // --- FUSIÓN ---
-        esActualizacion = true;
         pedidoId = pedidoExistente.id;
-
         for (const item of itemsAEnviar) {
           const cantidadNueva = parseFloat(cantidadesPedido[item.id]);
           const unidad = item.unidad === "kg" ? "kg" : "un";
           const detalleExistente = pedidoExistente.detalle_pedidos.find(
-            (d) => d.producto_nombre === item.nombre
+            (d) => d.producto_nombre === item.nombre && !d.recibido
           );
-
           if (detalleExistente) {
-            const cantidadAnterior = parseFloat(
-              detalleExistente.cantidad_solicitada
-            );
-            const nuevaSuma = cantidadAnterior + cantidadNueva;
+            const nuevaSuma =
+              parseFloat(detalleExistente.cantidad_solicitada) + cantidadNueva;
             await supabase
               .from("detalle_pedidos")
               .update({ cantidad_solicitada: `${nuevaSuma} ${unidad}` })
@@ -167,25 +323,24 @@ export const useStockStore = create((set, get) => ({
           }
         }
       } else {
-        // --- CREACIÓN ---
-        const { data: nuevoPedido } = await supabase
+        const { data: nuevo } = await supabase
           .from("pedidos")
           .insert({})
           .select()
           .single();
-        pedidoId = nuevoPedido.id;
-        const detalles = itemsAEnviar.map((p) => ({
-          pedido_id: pedidoId,
-          producto_nombre: p.nombre,
-          cantidad_solicitada: `${cantidadesPedido[p.id]} ${
-            p.unidad === "kg" ? "kg" : "un"
-          }`,
-        }));
-        await supabase.from("detalle_pedidos").insert(detalles);
+        pedidoId = nuevo.id;
+        await supabase.from("detalle_pedidos").insert(
+          itemsAEnviar.map((p) => ({
+            pedido_id: pedidoId,
+            producto_nombre: p.nombre,
+            cantidad_solicitada: `${cantidadesPedido[p.id]} ${
+              p.unidad === "kg" ? "kg" : "un"
+            }`,
+          }))
+        );
       }
 
-      // 2. Generar Mensaje Final
-      const { data: pedidoFinal } = await supabase
+      const { data: final } = await supabase
         .from("pedidos")
         .select("*, detalle_pedidos(*)")
         .eq("id", pedidoId)
@@ -193,24 +348,16 @@ export const useStockStore = create((set, get) => ({
       let msg = `📋 *PEDIDO COCINA SILVESTRE* (${formatearFecha(
         new Date()
       )})\n\n`;
-      pedidoFinal.detalle_pedidos.forEach((d) => {
-        msg += `- ${d.producto_nombre}: *${d.cantidad_solicitada}*\n`;
+      final.detalle_pedidos.forEach((d) => {
+        if (!d.recibido)
+          msg += `- ${d.producto_nombre}: *${d.cantidad_solicitada}*\n`;
       });
-
       navigator.clipboard.writeText(msg);
-
-      // 3. Feedback (Aquí está el toast success asegurado)
-      toast.success(
-        esActualizacion
-          ? "¡Pedido actualizado y copiado!"
-          : "¡Pedido creado y copiado!",
-        { id: toastId }
-      );
-
-      return true; // Éxito
-    } catch (error) {
-      console.error(error);
-      toast.error("Error procesando pedido", { id: toastId });
+      toast.success("Pedido listo", { id: toastId });
+      get().calcularPendientes();
+      return true;
+    } catch (e) {
+      toast.error("Error", { id: toastId });
       return false;
     }
   },

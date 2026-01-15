@@ -1,8 +1,12 @@
 import { Toaster } from "react-hot-toast";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+
+// Pages & Components
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
+import RecipesPage from "./pages/RecipesPage"; // <--- Importamos la nueva página
+import Navbar from "./components/Navbar"; // <--- Importamos el Navbar
 
 // Componente para proteger rutas privadas
 const ProtectedRoute = ({ children }) => {
@@ -13,30 +17,54 @@ const ProtectedRoute = ({ children }) => {
     return <Navigate to="/login" replace />;
   }
 
-  return children;
+  // Si está logueado, mostramos el Navbar y el contenido (children)
+  return (
+    <>
+      <Navbar /> {/* El menú aparecerá en todas las páginas protegidas */}
+      {children}
+    </>
+  );
 };
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          {/* Ruta Pública */}
-          <Route path="/login" element={<Login />} />
+    <>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
+            {/* Ruta Pública */}
+            <Route path="/login" element={<Login />} />
 
-          {/* Ruta Privada (El POS) */}
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <Dashboard />
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
-      </BrowserRouter>
+            {/* --- RUTAS PRIVADAS (Con Navbar incluido) --- */}
 
-      <Toaster position="top-center" reverseOrder={false} />
-    </AuthProvider>
+            {/* 1. Dashboard (Stock y Pedidos) */}
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <Dashboard />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* 2. Recetas (Menú y Producción) */}
+            <Route
+              path="/recetas"
+              element={
+                <ProtectedRoute>
+                  <RecipesPage />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Redirección por defecto si la ruta no existe */}
+            <Route path="*" element={<Navigate to="/" />} />
+          </Routes>
+        </BrowserRouter>
+      </AuthProvider>
+
+      {/* Cambié la posición a bottom-center para que no tape el Navbar en el móvil */}
+      <Toaster position="bottom-center" reverseOrder={false} />
+    </>
   );
 }
