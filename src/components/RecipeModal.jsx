@@ -50,12 +50,9 @@ export default function RecipeModal({ producto, onClose }) {
     cargarDatos();
   }, [producto]);
 
-  useEffect(() => {
-    if (insumoLimitante) {
-      setInsumoLimitante(null);
-      setVaciarLimitante(false);
-    }
-  }, [cantidadProducir]);
+  // --- CORRECCIÓN: ELIMINAMOS EL USEEFFECT CONFLICTIVO ---
+  // Antes había un useEffect aquí que reseteaba todo al cambiar la cantidad.
+  // Lo borramos para que no choque con "Calc. Máx".
 
   const onAddIngredient = async (data) => {
     if (!data.insumo_id || !data.cantidad) return;
@@ -121,6 +118,17 @@ export default function RecipeModal({ producto, onClose }) {
     }
   };
 
+  // --- HANDLER PARA INPUT MANUAL ---
+  // Movemos la lógica de limpieza aquí
+  const handleManualChange = (e) => {
+    setCantidadProducir(e.target.value);
+    // Si el usuario escribe a mano, quitamos la sugerencia automática de vaciar
+    if (insumoLimitante) {
+      setInsumoLimitante(null);
+      setVaciarLimitante(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
@@ -170,7 +178,7 @@ export default function RecipeModal({ producto, onClose }) {
                 placeholder="Cant..."
                 className="flex-1 border border-emerald-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500 font-bold text-emerald-900 text-lg w-full min-w-0"
                 value={cantidadProducir}
-                onChange={(e) => setCantidadProducir(e.target.value)}
+                onChange={handleManualChange} // <--- USAMOS EL NUEVO HANDLER
               />
               <button
                 onClick={handleProducir}

@@ -26,7 +26,7 @@ export const useStockStore = create((set, get) => ({
   pendientes: {},
   loading: true,
 
-  // Almacén de temporizadores para el debounce (evita lag en clicks rápidos)
+  // Almacén de temporizadores para el debounce
   writeTimeouts: {},
 
   // --- CARGAR PRODUCTOS (Con Lógica Híbrida) ---
@@ -48,14 +48,14 @@ export const useStockStore = create((set, get) => ({
           const padre = productosMap.get(prod.stock_padre_id);
           if (padre) {
             // --- LÓGICA HÍBRIDA DE LECTURA ---
-            const esContenido = padre.unidad === "unidad"; // Si el padre es Maple, Pack, Caja
+            const esContenido = padre.unidad === "unidad";
             let cantidadCalculada = 0;
 
             if (esContenido) {
-              // Lógica Multiplicación (Ej: 2 Maples * 30 = 60 Huevos)
+              // Lógica Multiplicación (Ej: Huevos)
               cantidadCalculada = padre.cantidad * prod.factor_conversion;
             } else {
-              // Lógica División (Ej: 5 Kg Carne / 0.145 = 34.48 Medallones)
+              // Lógica División (Ej: Medallones)
               cantidadCalculada =
                 prod.factor_conversion > 0
                   ? padre.cantidad / prod.factor_conversion
@@ -129,10 +129,7 @@ export const useStockStore = create((set, get) => ({
     const prod = productos.find((p) => p.id === id);
     if (!prod) return;
 
-    // Calculamos el nuevo total basado en la memoria real
     const nuevoTotal = parseFloat((prod.cantidad + cantidadASumar).toFixed(3));
-
-    // Llamamos a la función principal
     get().actualizarStockCantidad(id, nuevoTotal);
   },
 
@@ -141,9 +138,8 @@ export const useStockStore = create((set, get) => ({
     const productosActuales = get().productos;
     const prod = productosActuales.find((p) => p.id === id);
 
-    // 🛑 CASO A: Es un HIJO (Ej: Modifico Huevos o Medallones manualmente)
+    // 🛑 CASO A: Es un HIJO
     if (prod && prod.stock_padre_id && prod.factor_conversion) {
-      // Necesitamos el padre para saber su unidad
       const padre = productosActuales.find((p) => p.id === prod.stock_padre_id);
 
       if (padre) {
@@ -151,14 +147,11 @@ export const useStockStore = create((set, get) => ({
         let nuevoStockPadre = 0;
 
         if (esContenido) {
-          // Inversa de Multiplicación -> División (Huevos a Maples)
           nuevoStockPadre = nuevaCantidad / prod.factor_conversion;
         } else {
-          // Inversa de División -> Multiplicación (Medallones a Carne)
           nuevoStockPadre = nuevaCantidad * prod.factor_conversion;
         }
 
-        // Llamada recursiva al padre (Esto entrará en CASO B)
         return get().actualizarStockCantidad(
           prod.stock_padre_id,
           parseFloat(nuevoStockPadre.toFixed(4))
@@ -167,15 +160,11 @@ export const useStockStore = create((set, get) => ({
     }
 
     // 🟢 CASO B: Es un PRODUCTO NORMAL o PADRE
-
-    // 1. Actualizamos la UI INMEDIATAMENTE (Optimistic Update)
     const nuevosProductos = productosActuales.map((p) => {
-      // A) Si es el producto tocado
       if (p.id === id) return { ...p, cantidad: nuevaCantidad };
 
-      // B) Si es un HIJO de este producto (Recalculamos visualmente)
+      // Si es un HIJO de este producto, RECALCULAMOS su stock visualmente
       if (p.stock_padre_id === id && p.factor_conversion) {
-        // 'prod' aquí es el padre que estamos editando
         const padreUnidad = prod.unidad === "unidad";
         let cantidadHijo = 0;
 
@@ -192,7 +181,6 @@ export const useStockStore = create((set, get) => ({
 
     set({ productos: nuevosProductos });
 
-    // 2. DEBOUNCE (Frenado) DE LA BASE DE DATOS
     const timeouts = get().writeTimeouts;
     if (timeouts[id]) clearTimeout(timeouts[id]);
 
@@ -205,16 +193,15 @@ export const useStockStore = create((set, get) => ({
         toast.error("Error guardando");
         get().cargarProductos();
       }
-      // Limpieza de timeout
       const currentTs = get().writeTimeouts;
       const { [id]: _, ...rest } = currentTs;
       set({ writeTimeouts: rest });
-    }, 500); // 500ms de espera
+    }, 500);
 
     set({ writeTimeouts: { ...timeouts, [id]: nuevoTimeout } });
   },
 
-  // --- PEDIDOS E HISTORIAL (Sin cambios) ---
+  // --- PEDIDOS E HISTORIAL ---
   cargarHistorial: async () => {
     const { data } = await supabase
       .from("pedidos")
@@ -248,7 +235,6 @@ export const useStockStore = create((set, get) => ({
             const nuevoStock = parseFloat(
               (productoEnStock.cantidad - cantidadARestar).toFixed(3)
             );
-            // Usamos update directo para evitar el debounce en borrado masivo
             actualizacionesDeStock.push(
               supabase
                 .from("productos")
@@ -359,6 +345,85 @@ export const useStockStore = create((set, get) => ({
     } catch (e) {
       toast.error("Error", { id: toastId });
       return false;
+    }
+  },
+
+  // --- CONFIRMAR RECEPCIÓN (La función que faltaba) ---
+  confirmarRecepcion: async (pedidoId, itemsRecibidosIds, itemsFaltantes) => {
+    const toastId = toast.loading("Procesando recepción...");
+    try {
+      // 1. Marcar como recibidos los seleccionados
+      for (const item of itemsFaltantes) {
+        const fueRecibido = itemsRecibidosIds.includes(item.id);
+        if (fueRecibido) {
+          // Actualizar estado en DB
+          await supabase
+            .from("detalle_pedidos")
+            .update({ recibido: true, estado: "entregado" })
+            .eq("id", item.id);
+
+          // Sumar al Stock
+          const cantidadRecibida = parseFloat(item.cantidad_solicitada);
+          const productoEnStock = get().productos.find(
+            (p) => p.nombre === item.producto_nombre
+          );
+
+          if (productoEnStock && cantidadRecibida > 0) {
+            // Usamos sumarStock o actualizarStockCantidad directo
+            // Para asegurar que se guarden los decimales y la lógica padre/hijo,
+            // calculamos el nuevo total y usamos actualizarStockCantidad.
+            const nuevoTotal = parseFloat(
+              (productoEnStock.cantidad + cantidadRecibida).toFixed(3)
+            );
+            await get().actualizarStockCantidad(productoEnStock.id, nuevoTotal);
+          }
+        }
+      }
+
+      // 2. Gestionar los NO recibidos (Pasar a pedido de mañana)
+      const noRecibidos = itemsFaltantes.filter(
+        (i) => !itemsRecibidosIds.includes(i.id)
+      );
+
+      if (noRecibidos.length > 0) {
+        // Marcar como "no_entregado" en este pedido
+        await supabase
+          .from("detalle_pedidos")
+          .update({ recibido: true, estado: "no_entregado" })
+          .in(
+            "id",
+            noRecibidos.map((i) => i.id)
+          );
+
+        // Crear pedido para mañana (o el próximo día)
+        const manana = new Date();
+        manana.setDate(manana.getDate() + 1);
+
+        const { data: nuevoPedido } = await supabase
+          .from("pedidos")
+          .insert({ created_at: manana.toISOString() })
+          .select()
+          .single();
+
+        // Mover los items pendientes al nuevo pedido
+        await supabase.from("detalle_pedidos").insert(
+          noRecibidos.map((i) => ({
+            pedido_id: nuevoPedido.id,
+            producto_nombre: i.producto_nombre,
+            cantidad_solicitada: i.cantidad_solicitada,
+            recibido: false,
+            estado: "pendiente",
+          }))
+        );
+      }
+
+      toast.success("Recepción confirmada", { id: toastId });
+      get().cargarHistorial();
+      get().cargarProductos();
+      get().calcularPendientes();
+    } catch (e) {
+      console.error(e);
+      toast.error("Error en recepción", { id: toastId });
     }
   },
 }));

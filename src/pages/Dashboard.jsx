@@ -53,7 +53,7 @@ export default function Dashboard() {
     cargarProductos,
     cargarHistorial,
     borrarProducto,
-    actualizarStockCantidad,
+    sumarStock,
     borrarPedido,
     procesarPedido,
   } = useStockStore();
@@ -101,23 +101,32 @@ export default function Dashboard() {
     setMostrarModal(true);
   };
 
+  // --- FUNCIÓN DE ACTUALIZACIÓN CORREGIDA ---
   const handleUpdateStock = async (producto, operacion) => {
-    let paso = modoManual ? parseFloat(valorManual) : cantidadPaso;
-    if (isNaN(paso) || paso <= 0) {
-      toast.error("Cantidad inválida");
+    // 1. MODO MANUAL (Escribir número específico y sumar/restar eso)
+    if (modoManual) {
+      const paso = parseFloat(valorManual);
+      if (isNaN(paso) || paso <= 0) {
+        toast.error("Ingresa un valor mayor a 0");
+        return;
+      }
+
+      // Usamos la lógica antigua para modo manual porque es un valor puntual grande
+      // O mejor aún, usamos sumarStock también aquí para ser consistentes
+      const cambio = operacion === "sumar" ? paso : -paso;
+      sumarStock(producto.id, cambio);
+
+      // Opcional: Resetear valor manual a 0 después de usarlo
+      // setValorManual(0);
       return;
     }
 
+    // 2. MODO NORMAL (Botones + / - rápidos)
+    const paso = parseFloat(cantidadPaso) || 1; // Default a 1 si falla
     const cambio = operacion === "sumar" ? paso : -paso;
-    let nueva = parseFloat((producto.cantidad + cambio).toFixed(3));
 
-    if (nueva < 0) {
-      nueva = 0;
-      if (operacion === "restar" && producto.cantidad > 0)
-        toast("Stock vaciado", { icon: "🗑️" });
-    }
-
-    await actualizarStockCantidad(producto.id, nueva);
+    // Usamos la nueva función optimizada del store
+    sumarStock(producto.id, cambio);
   };
 
   const handleGuardarPedido = async () => {
